@@ -2,9 +2,12 @@
 // everything lives in this browser's localStorage.
 
 const STORAGE_KEY = "pocket-ticket:v1";
+const LANGS = ["zh", "ko", "en"];
+const LANG_LABEL = { zh: "中", ko: "한", en: "EN" };
 
 function emptyTable() {
-  return { course: null, guests: 2, draft: {}, draftNote: "", rounds: [] };
+  // seated: guests are here (maybe only drinks so far) even before a course is picked.
+  return { course: null, seated: false, guests: 2, draft: {}, draftNote: "", rounds: [] };
 }
 
 function loadState() {
@@ -15,8 +18,10 @@ function loadState() {
   const tables = {};
   for (let n = 1; n <= TABLE_COUNT; n++) {
     tables[n] = Object.assign(emptyTable(), saved && saved.tables && saved.tables[n]);
+    if (tables[n].course) tables[n].seated = true;
   }
-  return { tables };
+  const lang = saved && LANGS.includes(saved.lang) ? saved.lang : "zh";
+  return { tables, lang };
 }
 
 function saveState() {
@@ -49,26 +54,49 @@ function timeStr(ts) {
   return d.getHours().toString().padStart(2, "0") + ":" + d.getMinutes().toString().padStart(2, "0");
 }
 
+// Menu names: the chosen language is shown big, the other two small.
+function mainName(it) {
+  return it[state.lang];
+}
+
+function otherNames(it) {
+  return LANGS.filter((l) => l !== state.lang).map((l) => it[l]);
+}
+
 function itemLabel(it) {
   const no = it.no !== undefined ? `<span class="no">${esc(it.no)}</span>` : "";
   const spicy = it.spicy ? ' <span class="spicy">🌶</span>' : "";
-  return `${no}<span class="zh">${esc(it.zh)}${spicy}</span><span class="en">${esc(it.en)}</span>`;
+  const subs = otherNames(it).map((n) => `<span class="sub">${esc(n)}</span>`).join("");
+  return `${no}<span class="main">${esc(mainName(it))}${spicy}</span>${subs}`;
 }
 
-// Order of groups when listing what a table has ordered.
-const GROUP_ORDER = ["premium", "meat", "soju", "fsoju", "beer", "wine", "soft"];
-const GROUP_LABEL = { premium: "Premium A–D", meat: "肉类 / 菜", drinks: "酒水饮料" };
+function rowName(it) {
+  const no = it.no !== undefined ? `<b>${esc(it.no)}</b> ` : "";
+  return `<span class="row-name">${no}${esc(mainName(it))} <small>${esc(otherNames(it)[0])}</small></span>`;
+}
+
+const GROUP_LABEL = {
+  premium: { zh: "Premium A–D", ko: "Premium A–D", en: "Premium A–D" },
+  meat: { zh: "肉类 / 菜", ko: "고기 / 요리", en: "Meat / Dishes" },
+  drinks: { zh: "酒水饮料", ko: "주류 / 음료", en: "Drinks" },
+};
 
 function sortedIds(ids) {
   const all = [...PREMIUM, ...MEATS, ...DRINK_GROUPS.flatMap((g) => g.items)].map((i) => i.id);
   return ids.slice().sort((a, b) => all.indexOf(a) - all.indexOf(b));
 }
 
+// Without a course yet, only drinks can be ordered.
 function categoriesFor(t) {
+  const cats = [];
   const c = COURSES[t.course];
-  const cats = [{ key: "meat", label: "肉类 " + c.short, items: c.meats }];
-  if (c.premium) cats.unshift({ key: "premium", label: "Premium A–D", items: PREMIUM });
-  for (const g of DRINK_GROUPS) cats.push({ key: g.key, label: g.label, items: g.items });
+  if (c) {
+    if (c.premium) cats.push({ key: "premium", label: GROUP_LABEL.premium[state.lang], items: PREMIUM });
+    cats.push({ key: "meat", label: GROUP_LABEL.meat[state.lang].split(" ")[0] + " " + c.short, items: c.meats });
+  }
+  // Before a course is picked, soft drinks (water etc.) come first.
+  const drinks = c ? DRINK_GROUPS : [...DRINK_GROUPS].sort((a, b) => (b.key === "soft") - (a.key === "soft"));
+  for (const g of drinks) cats.push({ key: g.key, label: g.label[state.lang], items: g.items });
   return cats;
 }
 
@@ -80,18 +108,22 @@ function renderTables() {
     const t = state.tables[n];
     const pend = pendingRounds(t).length;
     const draft = sumQty(t.draft);
-    const busy = t.course || t.rounds.length;
+    const busy = t.seated || t.rounds.length;
     cells += `
       <button class="table-cell ${busy ? "busy" : ""}" data-action="open-table" data-n="${n}">
         <span class="tnum">${n}</span>
-        ${t.course ? `<span class="course-chip c-${t.course}">${COURSES[t.course].short}</span>` : `<span class="free">空</span>`}
+        ${t.course
+          ? `<span class="course-chip c-${t.course}">${COURSES[t.course].short}</span>`
+          : `<span class="free">${t.seated ? "未选套餐" : "空"}</span>`}
         ${pend ? `<span class="badge pend">${pend} 待输入</span>` : ""}
         ${draft ? `<span class="badge draft">草稿 ${draft}</span>` : ""}
       </button>`;
   }
   return `
     <header class="bar">
+      <span></span>
       <h1>Pocket Ticket</h1>
+      ${langButton()}
     </header>
     <main class="tables-grid">${cells}</main>`;
 }
@@ -105,7 +137,7 @@ function renderCoursePicker(n, t) {
     .join("");
   return `
     <header class="bar">
-      <button class="icon-btn" data-action="${t.course ? "close-picker" : "back"}">‹</button>
+      <button class="icon-btn" data-action="${t.seated ? "close-picker" : "back"}">‹</button>
       <h1>${n} 号桌</h1>
       <span></span>
     </header>
@@ -118,6 +150,10 @@ function renderCoursePicker(n, t) {
       </div>
       <p class="hint">选择套餐（一桌只能选一种）</p>
       <div class="course-list">${opts}</div>
+      ${t.course ? "" : `
+        <button class="drinks-first" data-action="drinks-first">
+          先点酒水饮料<small>套餐等一下再选</small>
+        </button>`}
     </main>`;
 }
 
@@ -128,6 +164,7 @@ function renderOrderTab(t) {
   const chips = cats
     .map((c) => `<button class="chip ${c.key === ui.cat ? "active" : ""}" data-action="cat" data-cat="${c.key}">${esc(c.label)}</button>`)
     .join("");
+  const pickFirst = t.course ? "" : `<button class="chip pick" data-action="open-picker">+ 选套餐</button>`;
   const items = cat.items
     .map((it) => {
       const q = t.draft[it.id] || 0;
@@ -146,7 +183,7 @@ function renderOrderTab(t) {
       const it = ITEM_INDEX[id];
       return `
         <li>
-          <span class="row-name">${it.no !== undefined ? `<b>${esc(it.no)}</b> ` : ""}${esc(it.zh)} <small>${esc(it.en)}</small></span>
+          ${rowName(it)}
           <span class="stepper">
             <button data-action="dec" data-id="${id}">−</button>
             <span>${t.draft[id]}</span>
@@ -172,14 +209,14 @@ function renderOrderTab(t) {
         <button class="submit" data-action="submit" ${draftCount ? "" : "disabled"}>下单</button>
       </div>
     </section>`;
-  return { top: `<nav class="chips">${chips}</nav>`, body };
+  return { top: `<nav class="chips">${pickFirst}${chips}</nav>`, body };
 }
 
 function renderRoundItems(items) {
   return sortedIds(Object.keys(items))
     .map((id) => {
       const it = ITEM_INDEX[id];
-      return `<li><span class="row-name">${it.no !== undefined ? `<b>${esc(it.no)}</b> ` : ""}${esc(it.zh)} <small>${esc(it.en)}</small></span><span class="q">× ${items[id]}</span></li>`;
+      return `<li>${rowName(it)}<span class="q">× ${items[id]}</span></li>`;
     })
     .join("");
 }
@@ -219,12 +256,12 @@ function renderHistoryTab(t) {
   const totalHtml = Object.entries(buckets)
     .filter(([, ids]) => ids.length)
     .map(([g, ids]) => `
-      <h3>${GROUP_LABEL[g]}</h3>
+      <h3>${GROUP_LABEL[g][state.lang]}</h3>
       <ul class="rows">
         ${ids.map((id) => {
           const it = ITEM_INDEX[id];
           return `<li class="${fresh[id] ? "has-new" : ""}">
-            <span class="row-name">${it.no !== undefined ? `<b>${esc(it.no)}</b> ` : ""}${esc(it.zh)} <small>${esc(it.en)}</small></span>
+            ${rowName(it)}
             <span class="q">${fresh[id] ? `<em>+${fresh[id]} 新</em> ` : ""}× ${total[id]}</span>
           </li>`;
         }).join("")}
@@ -247,7 +284,7 @@ function renderHistoryTab(t) {
 function renderTable() {
   const n = ui.table;
   const t = state.tables[n];
-  if (!t.course || ui.pickCourse) return renderCoursePicker(n, t);
+  if (!t.seated || ui.pickCourse) return renderCoursePicker(n, t);
 
   const pend = pendingRounds(t).length;
   const view = ui.tab === "order" ? renderOrderTab(t) : { top: "", body: renderHistoryTab(t) };
@@ -256,10 +293,15 @@ function renderTable() {
     <header class="bar">
       <button class="icon-btn" data-action="back">‹</button>
       <h1>${n} 号桌
-        <button class="course-chip c-${t.course}" data-action="open-picker">${COURSES[t.course].short}</button>
+        ${t.course
+          ? `<button class="course-chip c-${t.course}" data-action="open-picker">${COURSES[t.course].short}</button>`
+          : `<button class="course-chip none" data-action="open-picker">套餐?</button>`}
         <small>${t.guests} 人</small>
       </h1>
-      <button class="text-btn danger" data-action="clear-table">清桌</button>
+      <span class="bar-right">
+        ${langButton()}
+        <button class="text-btn danger" data-action="clear-table">清桌</button>
+      </span>
     </header>
     <nav class="tabs">
       <button class="${ui.tab === "order" ? "active" : ""}" data-action="tab" data-tab="order">点单</button>
@@ -270,6 +312,10 @@ function renderTable() {
     ${view.top}
     </div>
     ${view.body}`;
+}
+
+function langButton() {
+  return `<button class="lang-btn" data-action="lang">${LANG_LABEL[state.lang]}</button>`;
 }
 
 function render() {
@@ -296,10 +342,18 @@ const actions = {
   },
   "set-course"(el, t) {
     t.course = el.dataset.course;
+    t.seated = true;
     ui.pickCourse = false;
     ui.cat = t.course === "P" ? "premium" : "meat";
   },
+  "drinks-first"(el, t) {
+    t.seated = true;
+    ui.pickCourse = false;
+    ui.tab = "order";
+    ui.cat = "soft";
+  },
   "open-picker"() { ui.pickCourse = true; },
+  lang() { state.lang = LANGS[(LANGS.indexOf(state.lang) + 1) % LANGS.length]; },
   "close-picker"() { ui.pickCourse = false; },
   guests(el, t) { t.guests = Math.max(1, t.guests + Number(el.dataset.d)); },
   cat(el) { ui.cat = el.dataset.cat; window.scrollTo(0, 0); },
